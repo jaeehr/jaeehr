@@ -221,6 +221,51 @@ async def main() -> int:
                 await browser.close()
                 return 2
 
+            # Dismiss cookie consent popup if present
+            cookie_btn_selectors = [
+                "button:has-text('ACCEPT EVERYTHING')",
+                "button:has-text('Accept everything')",
+                "button:has-text('Accept all')",
+                "button:has-text('REJECT EVERYTHING')",
+                "button:has-text('Reject everything')",
+                "#onetrust-accept-btn-handler",
+                "[class*='cookie'] button",
+                "[id*='cookie'] button",
+            ]
+            for sel in cookie_btn_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.count() > 0:
+                        await btn.click()
+                        print(f"  Dismissed cookie popup ({sel})")
+                        await page.wait_for_timeout(1500)
+                        break
+                except Exception:
+                    pass
+
+            # Click "PURCHASE" button to reveal the date picker
+            purchase_selectors = [
+                "button:has-text('PURCHASE')",
+                "a:has-text('PURCHASE')",
+                "button:has-text('Purchase')",
+                "[class*='purchase']",
+                "[class*='buy']",
+                "button:has-text('BUY')",
+            ]
+            for sel in purchase_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.count() > 0:
+                        await btn.click()
+                        print(f"  Clicked purchase button ({sel})")
+                        await page.wait_for_timeout(2000)
+                        break
+                except Exception:
+                    pass
+
+            await page.screenshot(path="step1b_after_cookie.png", full_page=False)
+            print("  Screenshot: step1b_after_cookie.png")
+
             print("Navigating calendar to June 2026...")
             reached = await navigate_to_month(page, TARGET_YEAR, TARGET_MONTH)
             await page.screenshot(path="step2_calendar.png", full_page=False)
