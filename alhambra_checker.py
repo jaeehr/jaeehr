@@ -5,6 +5,7 @@ Sends a push notification via ntfy.sh when tickets are found.
 """
 
 import asyncio
+import json
 import os
 import sys
 import urllib.request
@@ -18,165 +19,101 @@ TARGET_YEAR = 2026
 TARGET_MONTH = 6  # June
 TARGET_DAYS = [7, 8]
 
+# Keywords that mean a date is NOT bookable
+UNAVAILABLE_KEYWORDS = {
+    "not-available", "notavailable", "not_available",
+    "sold-out", "soldout", "sold_out",
+    "disabled", "unavailable", "blocked", "closed",
+    "unselectable", "ui-state-disabled", "ui-datepicker-unselectable",
+    "no-disponible", "agotado",
+}
 
-async def navigate_to_month(page, target_year: int, target_month: int) -> bool:
-    """Navigate the calendar to the target month/year. Returns True if successful."""
-    month_label_selectors = [
-        ".ui-datepicker-title",
-        ".ui-datepicker-month",
-        "[class*='month-title']",
-        "[class*='calendar-month']",
-        "h3.month",
-        ".month-name",
-        ".calendar-header",
-        "[class*='month'][class*='year']",
+
+async def dismiss_cookie_popup(page) -> None:
+    selectors = [
+        "button:has-text('REJECT EVERYTHING')",
+        "button:has-text('Reject everything')",
+        "button:has-text('ACCEPT EVERYTHING')",
+        "button:has-text('Accept everything')",
+        "button:has-text('Accept all')",
+        "#onetrust-accept-btn-handler",
     ]
-    next_btn_selectors = [
-        ".ui-datepicker-next",
-        "a.next",
-        "button.next",
-        "[data-action='next']",
-        "[aria-label='Next month']",
-        "[aria-label='Next']",
-        "[title='Next']",
-        ".next-month",
-        "[class*='next-month']",
-        "[class*='nextMonth']",
-    ]
-
-    month_names = [
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December",
-    ]
-    target_month_name = month_names[target_month - 1]
-
-    for attempt in range(24):
-        current_label = None
-        for sel in month_label_selectors:
-            try:
-                el = page.locator(sel).first
-                if await el.count() > 0:
-                    current_label = await el.inner_text()
-                    break
-            except Exception:
-                pass
-
-        if current_label:
-            print(f"  Calendar shows: {current_label!r}")
-            if target_month_name in current_label and str(target_year) in current_label:
-                print(f"  Reached {target_month_name} {target_year}")
-                return True
-
-        if attempt == 0 and not current_label:
-            print("  Warning: could not read calendar month label")
-            return False
-
-        clicked = False
-        for sel in next_btn_selectors:
-            try:
-                btn = page.locator(sel).first
-                if await btn.count() > 0:
-                    await btn.click()
-                    await page.wait_for_timeout(700)
-                    clicked = True
-                    break
-            except Exception:
-                pass
-
-        if not clicked:
-            print("  Could not find next-month button")
-            return False
-
-    return False
+    for sel in selectors:
+        try:
+            btn = page.locator(sel).first
+            if await btn.count() > 0:
+                await btn.click()
+                print(f"  Dismissed cookie popup via: {sel}")
+                await page.wait_for_timeout(1000)
+                return
+        except Exception:
+            pass
 
 
-async def find_available_days(page, days: list[int]) -> list[int]:
-    """Return the subset of `days` that appear available in the calendar."""
-    available = []
-
-    for day in days:
-        day_str = str(day)
-        found_available = False
-
-        selectors_available = [
-            f"td:not(.ui-datepicker-unselectable):not(.ui-state-disabled) a:text-is('{day_str}')",
-            f"td.available:has-text('{day_str}')",
-            f"td[class*='available']:has-text('{day_str}')",
-            f"td.bookable:has-text('{day_str}')",
-            f"td[data-date]:not(.sold-out):not(.disabled):not(.unavailable) >> text='{day_str}'",
-        ]
-
-        for sel in selectors_available:
-            try:
-                els = page.locator(sel)
-                count = await els.count()
-                if count > 0:
-                    found_available = True
-                    print(f"  Day {day}: AVAILABLE (matched: {sel!r})")
-                    break
-            except Exception:
-                pass
-
-        if not found_available:
-            try:
-                cells = page.locator("td").filter(has_text=day_str)
-                count = await cells.count()
-                for i in range(count):
-                    cell = cells.nth(i)
-                    cell_text = (await cell.inner_text()).strip()
-                    if cell_text != day_str:
-                        continue
-                    class_attr = await cell.get_attribute("class") or ""
-                    aria_disabled = await cell.get_attribute("aria-disabled") or ""
-                    disabled_keywords = {
-                        "disabled", "unavailable", "sold-out", "soldout",
-                        "unselectable", "blocked", "closed",
-                    }
-                    is_disabled = (
-                        aria_disabled == "true"
-                        or any(kw in class_attr.lower() for kw in disabled_keywords)
-                    )
-                    if not is_disabled:
-                        found_available = True
-                        print(f"  Day {day}: AVAILABLE (class={class_attr!r})")
-                        break
-                    else:
-                        print(f"  Day {day}: unavailable (class={class_attr!r})")
-            except Exception as e:
-                print(f"  Day {day}: error during check — {e}")
-
-        if found_available:
-            available.append(day)
-        else:
-            print(f"  Day {day}: not available")
-
-    return available
+async def dump_calendar_cells(page) -> list[dict]:
+    """Use JS to extract all calendar date cells so we can see their real classes."""
+    return await page.evaluate("""
+        () => {
+            // Try many common selectors for calendar day cells
+            const selectors = [
+                'td[data-date]',
+                'td.calendar-day',
+                'td[class*="day"]',
+                '.booking-calendar td',
+                '.datepicker td',
+                '.calendar td',
+                'table.ui-datepicker-calendar td',
+                '[class*="calendar"] td',
+                '[class*="datepicker"] td',
+            ];
+            let cells = [];
+            for (const sel of selectors) {
+                const found = document.querySelectorAll(sel);
+                if (found.length > 0) {
+                    cells = Array.from(found);
+                    break;
+                }
+            }
+            // Fall back: all td elements that contain just a number 1-31
+            if (cells.length === 0) {
+                cells = Array.from(document.querySelectorAll('td')).filter(td => {
+                    const t = td.textContent.trim();
+                    return /^\\d{1,2}$/.test(t) && parseInt(t) >= 1 && parseInt(t) <= 31;
+                });
+            }
+            return cells.map(td => ({
+                text: td.textContent.trim(),
+                className: td.className,
+                dataDate: td.getAttribute('data-date'),
+                ariaDisabled: td.getAttribute('aria-disabled'),
+                ariaLabel: td.getAttribute('aria-label'),
+                title: td.getAttribute('title'),
+                hasLink: td.querySelector('a') !== null,
+            }));
+        }
+    """)
 
 
-def send_ntfy(topic: str, available_days: list[int]) -> None:
-    days_str = " and ".join(f"June {d}" for d in available_days)
-    title = "Alhambra tickets available!"
-    message = f"Tickets for {days_str}, 2026 are available. Book now!"
+def is_available(cell: dict) -> bool:
+    """Decide if a calendar cell represents an available date."""
+    class_lower = (cell.get("className") or "").lower()
+    aria_disabled = (cell.get("ariaDisabled") or "").lower()
 
-    req = urllib.request.Request(
-        f"https://ntfy.sh/{topic}",
-        data=message.encode("utf-8"),
-        headers={
-            "Title": title,
-            "Priority": "urgent",
-            "Tags": "ticket,rotating_light",
-            "Click": TICKET_URL,
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        print(f"ntfy notification sent (status {resp.status})")
+    if aria_disabled == "true":
+        return False
+    if any(kw in class_lower for kw in UNAVAILABLE_KEYWORDS):
+        return False
+    # If it has a link it's almost certainly bookable
+    if cell.get("hasLink"):
+        return True
+    # If none of the unavailable keywords matched, assume available
+    return True
 
 
 async def main() -> int:
     ntfy_topic = os.environ.get("NTFY_TOPIC", "")
-
-    print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}] Checking Alhambra tickets...")
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    print(f"[{now_str}] Checking Alhambra tickets...")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -203,41 +140,64 @@ async def main() -> int:
         await context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
-
         page = await context.new_page()
 
         try:
             print(f"Loading {TICKET_URL} ...")
             await page.goto(TICKET_URL, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(4000)
-            await page.screenshot(path="step1_loaded.png", full_page=False)
-            print("  Page loaded. Screenshot: step1_loaded.png")
+            await page.wait_for_timeout(3000)
 
-            page_title = await page.title()
-            page_text = (await page.inner_text("body"))[:500]
-            print(f"  Title: {page_title!r}")
-            if any(kw in page_text.lower() for kw in ["403", "forbidden", "access denied", "captcha"]):
-                print("  WARNING: Possible bot challenge detected. Check the screenshot.")
-                await browser.close()
-                return 2
+            print(f"  Title: {await page.title()!r}")
+            await dismiss_cookie_popup(page)
 
-            print("Navigating calendar to June 2026...")
-            reached = await navigate_to_month(page, TARGET_YEAR, TARGET_MONTH)
-            await page.screenshot(path="step2_calendar.png", full_page=False)
-            print("  Screenshot: step2_calendar.png")
+            # Scroll down so the calendar renders
+            await page.evaluate("window.scrollTo(0, 600)")
+            await page.wait_for_timeout(2000)
+            await page.screenshot(path="step1_loaded.png", full_page=True)
+            print("  Screenshot: step1_loaded.png")
 
-            if not reached:
-                print("  WARNING: Could not confirm calendar reached June 2026. Attempting check anyway.")
+            # Dump all calendar cells so we can see the real HTML structure
+            cells = await dump_calendar_cells(page)
+            print(f"  Found {len(cells)} calendar cells")
+            if cells:
+                print("  Sample cells (first 10):")
+                for c in cells[:10]:
+                    print(f"    {c}")
 
-            print(f"Checking availability for days: {TARGET_DAYS}")
-            available_days = await find_available_days(page, TARGET_DAYS)
-            await page.screenshot(path="step3_result.png", full_page=False)
-            print("  Screenshot: step3_result.png")
+            # Save full cell dump for debugging
+            with open("calendar_cells.json", "w") as f:
+                json.dump(cells, f, indent=2)
+            print("  Full cell dump: calendar_cells.json")
+
+            # Check availability for target days in June
+            target_day_strs = {str(d) for d in TARGET_DAYS}
+            available_days = []
+
+            for cell in cells:
+                text = cell.get("text", "").strip()
+                if text not in target_day_strs:
+                    continue
+
+                # Filter to June 2026 if data-date is present
+                data_date = cell.get("dataDate") or ""
+                if data_date:
+                    if f"{TARGET_YEAR}-{TARGET_MONTH:02d}" not in data_date:
+                        continue
+
+                day = int(text)
+                available = is_available(cell)
+                status = "AVAILABLE" if available else "not available"
+                print(f"  June {day}: {status} | class={cell.get('className')!r} | dataDate={data_date!r}")
+                if available and day not in available_days:
+                    available_days.append(day)
+
+            await page.screenshot(path="step2_result.png", full_page=True)
+            print("  Screenshot: step2_result.png")
 
         except PlaywrightTimeout as e:
             print(f"TIMEOUT: {e}", file=sys.stderr)
             try:
-                await page.screenshot(path="error.png")
+                await page.screenshot(path="error.png", full_page=True)
             except Exception:
                 pass
             await browser.close()
@@ -245,7 +205,7 @@ async def main() -> int:
         except Exception as e:
             print(f"ERROR: {e}", file=sys.stderr)
             try:
-                await page.screenshot(path="error.png")
+                await page.screenshot(path="error.png", full_page=True)
             except Exception:
                 pass
             await browser.close()
@@ -254,16 +214,36 @@ async def main() -> int:
         await browser.close()
 
     if available_days:
-        days_str = " and ".join(f"June {d}" for d in available_days)
+        days_str = " and ".join(f"June {d}" for d in sorted(available_days))
         print(f"\nTICKETS AVAILABLE: {days_str}!")
         if ntfy_topic:
-            send_ntfy(ntfy_topic, available_days)
+            send_ntfy(ntfy_topic, sorted(available_days))
         else:
             print("NTFY_TOPIC not set — skipping push notification")
-        return 0
     else:
         print("\nNo tickets available for June 7-8 right now.")
-        return 0
+
+    return 0
+
+
+def send_ntfy(topic: str, available_days: list[int]) -> None:
+    days_str = " and ".join(f"June {d}" for d in available_days)
+    title = "Alhambra tickets available!"
+    message = f"Tickets for {days_str}, 2026 are available. Book now!"
+
+    req = urllib.request.Request(
+        f"https://ntfy.sh/{topic}",
+        data=message.encode("utf-8"),
+        headers={
+            "Title": title,
+            "Priority": "urgent",
+            "Tags": "ticket,rotating_light",
+            "Click": TICKET_URL,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        print(f"ntfy notification sent (status {resp.status})")
 
 
 if __name__ == "__main__":
