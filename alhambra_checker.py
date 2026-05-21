@@ -29,9 +29,8 @@ UNAVAILABLE_KEYWORDS = {
 
 
 async def dismiss_cookie_popup(page) -> None:
+    # Prefer "Accept" — "Reject" causes a page navigation that breaks the script
     selectors = [
-        "button:has-text('REJECT EVERYTHING')",
-        "button:has-text('Reject everything')",
         "button:has-text('ACCEPT EVERYTHING')",
         "button:has-text('Accept everything')",
         "button:has-text('Accept all')",
@@ -43,10 +42,13 @@ async def dismiss_cookie_popup(page) -> None:
             if await btn.count() > 0:
                 await btn.click()
                 print(f"  Dismissed cookie popup via: {sel}")
-                await page.wait_for_timeout(2500)
+                # Wait for any navigation triggered by the cookie choice to finish
+                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                await page.wait_for_timeout(2000)
                 return
         except Exception:
             pass
+    print("  No cookie popup found (or already dismissed)")
 
 
 async def dump_calendar_cells(page) -> list[dict]:
@@ -56,7 +58,7 @@ async def dump_calendar_cells(page) -> list[dict]:
             // 1. Prefer elements with data-date attribute (most reliable)
             let cells = Array.from(document.querySelectorAll('[data-date]'));
 
-            // 2. Try common calendar containers with any child element
+            // 2. Try common calendar containers
             if (cells.length === 0) {
                 const containerSelectors = [
                     '.booking-calendar', '.datepicker', '.calendar',
@@ -66,7 +68,6 @@ async def dump_calendar_cells(page) -> list[dict]:
                 for (const sel of containerSelectors) {
                     const container = document.querySelector(sel);
                     if (container) {
-                        // Get all leaf-ish elements inside that contain a day number
                         const candidates = container.querySelectorAll('td, div, span, a, li');
                         const dayEls = Array.from(candidates).filter(el => {
                             const t = el.textContent.trim();
@@ -77,7 +78,7 @@ async def dump_calendar_cells(page) -> list[dict]:
                 }
             }
 
-            // 3. Broadest fallback: any element on the page whose sole text is 1-31
+            // 3. Broadest fallback: any element whose sole text is 1-31
             if (cells.length === 0) {
                 const all = document.querySelectorAll('td, div, span, a, li, button');
                 cells = Array.from(all).filter(el => {
@@ -155,11 +156,11 @@ async def main() -> int:
             # Scroll incrementally to trigger lazy-loaded calendar
             for scroll_y in [300, 600, 900, 1200]:
                 await page.evaluate(f"window.scrollTo(0, {scroll_y})")
-                await page.wait_for_timeout(600)
-
+                await page.wait_for_timeout(500)
             await page.wait_for_timeout(2000)
+
             await page.screenshot(path="step1_loaded.png", full_page=True)
-            print("  Screenshot: step1_loaded.png (full page)")
+            print("  Screenshot: step1_loaded.png")
 
             cells = await dump_calendar_cells(page)
             print(f"  Found {len(cells)} calendar cells")
