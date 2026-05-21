@@ -1,0 +1,48 @@
+name: Alhambra Ticket Checker
+
+on:
+  schedule:
+    # Every 15 minutes, all day
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    # Allow manual trigger from the Actions tab (useful for first test)
+
+jobs:
+  check-tickets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-playwright
+
+      - name: Install Python dependencies
+        run: pip install playwright
+
+      - name: Install Chromium
+        run: playwright install --with-deps chromium
+
+      - name: Check Alhambra availability
+        env:
+          NOTIFY_EMAIL: jaer978@gmail.com
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python alhambra_checker.py
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: '*.png'
+          retention-days: 3
