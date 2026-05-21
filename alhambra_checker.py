@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
 Checks Alhambra ticket availability for June 7-8, 2026.
-Sends email notification when tickets are found.
+Sends a push notification via ntfy.sh when tickets are found.
 """
 
 import asyncio
 import os
-import smtplib
 import sys
+import urllib.request
 from datetime import datetime, timezone
-from email.mime.image import MIMEImage
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from pathlib import Path
 
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
@@ -22,13 +18,9 @@ TARGET_YEAR = 2026
 TARGET_MONTH = 6  # June
 TARGET_DAYS = [7, 8]
 
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-
 
 async def navigate_to_month(page, target_year: int, target_month: int) -> bool:
     """Navigate the calendar to the target month/year. Returns True if successful."""
-    # Selectors to find the current month label
     month_label_selectors = [
         ".ui-datepicker-title",
         ".ui-datepicker-month",
@@ -39,7 +31,6 @@ async def navigate_to_month(page, target_year: int, target_month: int) -> bool:
         ".calendar-header",
         "[class*='month'][class*='year']",
     ]
-    # Selectors for "next month" navigation
     next_btn_selectors = [
         ".ui-datepicker-next",
         "a.next",
@@ -59,8 +50,7 @@ async def navigate_to_month(page, target_year: int, target_month: int) -> bool:
     ]
     target_month_name = month_names[target_month - 1]
 
-    for attempt in range(24):  # up to 24 months forward
-        # Read current month from the calendar
+    for attempt in range(24):
         current_label = None
         for sel in month_label_selectors:
             try:
@@ -81,7 +71,6 @@ async def navigate_to_month(page, target_year: int, target_month: int) -> bool:
             print("  Warning: could not read calendar month label")
             return False
 
-        # Click next month
         clicked = False
         for sel in next_btn_selectors:
             try:
@@ -109,15 +98,10 @@ async def find_available_days(page, days: list[int]) -> list[int]:
         day_str = str(day)
         found_available = False
 
-        # Strategy 1: jQuery UI datepicker — available days have a clickable <a>
-        # Unavailable days have class ui-datepicker-unselectable or ui-state-disabled
         selectors_available = [
-            # Standard jQuery UI datepicker: td not disabled, containing <a> with day text
             f"td:not(.ui-datepicker-unselectable):not(.ui-state-disabled) a:text-is('{day_str}')",
-            # Generic available cell
             f"td.available:has-text('{day_str}')",
             f"td[class*='available']:has-text('{day_str}')",
-            # Bookable (WooCommerce bookings plugin)
             f"td.bookable:has-text('{day_str}')",
             f"td[data-date]:not(.sold-out):not(.disabled):not(.unavailable) >> text='{day_str}'",
         ]
@@ -134,10 +118,8 @@ async def find_available_days(page, days: list[int]) -> list[int]:
                 pass
 
         if not found_available:
-            # Strategy 2: look for the day cell and check it's not disabled
             try:
-                # Find all td cells containing exactly this day number
-                cells = page.locator(f"td").filter(has_text=day_str)
+                cells = page.locator("td").filter(has_text=day_str)
                 count = await cells.count()
                 for i in range(count):
                     cell = cells.nth(i)
@@ -161,7 +143,7 @@ async def find_available_days(page, days: list[int]) -> list[int]:
                     else:
                         print(f"  Day {day}: unavailable (class={class_attr!r})")
             except Exception as e:
-                print(f"  Day {day}: error during strategy 2 — {e}")
+                print(f"  Day {day}: error during check — {e}")
 
         if found_available:
             available.append(day)
@@ -171,10 +153,28 @@ async def find_available_days(page, days: list[int]) -> list[int]:
     return available
 
 
+def send_ntfy(topic: str, available_days: list[int]) -> None:
+    days_str = " and ".join(f"June {d}" for d in available_days)
+    title = "Alhambra tickets available!"
+    message = f"Tickets for {days_str}, 2026 are available. Book now!"
+
+    req = urllib.request.Request(
+        f"https://ntfy.sh/{topic}",
+        data=message.encode("utf-8"),
+        headers={
+            "Title": title,
+            "Priority": "urgent",
+            "Tags": "ticket,rotating_light",
+            "Click": TICKET_URL,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        print(f"ntfy notification sent (status {resp.status})")
+
+
 async def main() -> int:
-    notify_email = os.environ.get("NOTIFY_EMAIL", "jaer978@gmail.com")
-    smtp_user = os.environ.get("GMAIL_USER", "")
-    smtp_pass = os.environ.get("GMAIL_APP_PASSWORD", "")
+    ntfy_topic = os.environ.get("NTFY_TOPIC", "")
 
     print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}] Checking Alhambra tickets...")
 
@@ -200,7 +200,6 @@ async def main() -> int:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             },
         )
-        # Hide webdriver flag
         await context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
@@ -214,26 +213,22 @@ async def main() -> int:
             await page.screenshot(path="step1_loaded.png", full_page=False)
             print("  Page loaded. Screenshot: step1_loaded.png")
 
-            # Check for bot challenge / access denied
             page_title = await page.title()
             page_text = (await page.inner_text("body"))[:500]
             print(f"  Title: {page_title!r}")
             if any(kw in page_text.lower() for kw in ["403", "forbidden", "access denied", "captcha"]):
                 print("  WARNING: Possible bot challenge detected. Check the screenshot.")
-                await page.screenshot(path="step1_loaded.png")
                 await browser.close()
                 return 2
 
-            # Navigate calendar to June 2026
             print("Navigating calendar to June 2026...")
             reached = await navigate_to_month(page, TARGET_YEAR, TARGET_MONTH)
             await page.screenshot(path="step2_calendar.png", full_page=False)
             print("  Screenshot: step2_calendar.png")
 
             if not reached:
-                print("  WARNING: Could not confirm calendar reached June 2026. Attempting date check anyway.")
+                print("  WARNING: Could not confirm calendar reached June 2026. Attempting check anyway.")
 
-            # Check availability
             print(f"Checking availability for days: {TARGET_DAYS}")
             available_days = await find_available_days(page, TARGET_DAYS)
             await page.screenshot(path="step3_result.png", full_page=False)
@@ -261,61 +256,14 @@ async def main() -> int:
     if available_days:
         days_str = " and ".join(f"June {d}" for d in available_days)
         print(f"\nTICKETS AVAILABLE: {days_str}!")
-        if smtp_user and smtp_pass:
-            send_email(
-                smtp_user=smtp_user,
-                smtp_pass=smtp_pass,
-                to_email=notify_email,
-                available_days=available_days,
-            )
+        if ntfy_topic:
+            send_ntfy(ntfy_topic, available_days)
         else:
-            print("GMAIL_USER / GMAIL_APP_PASSWORD not set — skipping email")
+            print("NTFY_TOPIC not set — skipping push notification")
         return 0
     else:
         print("\nNo tickets available for June 7-8 right now.")
         return 0
-
-
-def send_email(smtp_user: str, smtp_pass: str, to_email: str, available_days: list[int]) -> None:
-    days_str = " and ".join(f"June {d}, 2026" for d in available_days)
-    subject = f"Alhambra tickets AVAILABLE: {days_str}"
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-    msg = MIMEMultipart("related")
-    msg["Subject"] = subject
-    msg["From"] = smtp_user
-    msg["To"] = to_email
-
-    html_body = f"""\
-<html><body>
-<h2>Alhambra tickets are available!</h2>
-<p>Tickets for <strong>{days_str}</strong> appear to be available on the official site.</p>
-<p><a href="{TICKET_URL}" style="font-size:18px;color:#c00;">Book now &rarr;</a></p>
-<p style="color:#666;">Checked at {now}</p>
-<hr>
-<p>Screenshot from the booking page:</p>
-<img src="cid:screenshot" style="max-width:100%;border:1px solid #ccc;">
-</body></html>
-"""
-    msg.attach(MIMEText(html_body, "html"))
-
-    screenshot = Path("step3_result.png")
-    if not screenshot.exists():
-        screenshot = Path("step2_calendar.png")
-    if screenshot.exists():
-        with open(screenshot, "rb") as f:
-            img = MIMEImage(f.read())
-            img.add_header("Content-ID", "<screenshot>")
-            img.add_header("Content-Disposition", "inline", filename=screenshot.name)
-            msg.attach(img)
-
-    print(f"Sending email to {to_email}...")
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(smtp_user, smtp_pass)
-        server.send_message(msg)
-    print("Email sent!")
 
 
 if __name__ == "__main__":

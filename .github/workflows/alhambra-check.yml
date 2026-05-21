@@ -34,9 +34,7 @@ jobs:
 
       - name: Check Alhambra availability
         env:
-          NOTIFY_EMAIL: jaer978@gmail.com
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python alhambra_checker.py
 
       - name: Upload screenshots
